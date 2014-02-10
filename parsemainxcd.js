@@ -1,5 +1,11 @@
 var fs = require('fs');
 var xml2js = require('xml2js');
+var csvWriter = require('csv-write-stream')
+
+var writer = csvWriter({
+	headers: ['Property','Type','Value']
+});
+writer.pipe(fs.createWriteStream('out.csv'));
 
 var mainxcd = fs.readFileSync('main.xcd','utf-8');
 
@@ -8,21 +14,21 @@ var parser = new xml2js.Parser({
 });
 
 var properties = [];
+var indexedProperties = {};
 
 parser.parseString(mainxcd,function(err,parse){
 
 	// Top level nodes
-	var nodes = parse['oor:data']['oor:component-data'];
+	var nodes = [];
+	// nodes = nodes.concat(parse['oor:data']['oor:component-data'])
+	nodes = nodes.concat(parse['oor:data']['oor:component-schema'])
 
 	// For each top level oor:component-data node...
 	nodes.forEach(function(thisNode){
 		var package = thisNode.$['oor:package'];
 		var name = thisNode.$['oor:name'];
-		scanXmlTree('root',thisNode,'');
-	})
-
-	// Output a tsv.
-	console.log(properties.join('\n'));
+		scanXmlTree(null,thisNode,'',0);
+	});
 
 });
 
@@ -30,37 +36,61 @@ parser.parseString(mainxcd,function(err,parse){
  * Scan the XML tree and make an index of values by path.
  * TODO: Logic for converting this into a proper registry key.
  */
-function scanXmlTree(elementType,node,path){
-	if(!node || !node.$){
+function scanXmlTree(elementType,node,path,i){
+
+	i++;
+
+	if(!node){
 		return;
 	}
-	path += '/'+node.$['oor:name'];
 
-	['node','prop','group','set'].forEach(function(elementType){
+	if(!node.$ && ['templates','component'].indexOf(elementType) == -1){
+		return;
+	}
+
+	console.log(i);
+
+	if(node.$){
+		// console.log(node.$['oor:package']);
+		if(node.$['oor:package']){
+			path += '/'+node.$['oor:package'];
+		}
+		path += '/'+node.$['oor:name'];
+	} else {
+		// path += '/'+elementType;
+	}
+
+	['node','prop','group','set', 'component','group','templates'].forEach(function(elementType){
 		var thisElement = node[elementType];
 		if(thisElement && thisElement.forEach){
 			thisElement.forEach(function(thisElement){
 				scanXmlTree(
 					elementType,
 					thisElement,
-					path
+					path,
+					i
 				);
 			});
 		} else {
 			scanXmlTree(
 				elementType,
 				thisElement,
-				path
+				path,
+				i
 			);
 		}
 	});
 
-	if(typeof node.value != 'undefined'){
+	if(typeof node.value != 'undefined' && !indexedProperties[path]){
 		// We've finally reached a settable property.
-		properties.push([
+		writer.write([
 			path,
-			parseValue(node.value).join('\t')
-		].join('\t'));
+			node.$ && node.$['oor:type'],
+			parseValue(node.value)
+		]);
+
+		// Index this so we don't end up with duplicates.
+		indexedProperties[path.replace('\/','.')] = path;
 	}
 
 	return path;
@@ -73,35 +103,23 @@ function scanXmlTree(elementType,node,path){
  * @return {array}                 Array containing [type,value]
  */
 function parseValue(value){
-	if(typeof value == 'string'){
-		// Fake booleans
-		if(value === 'true' || value === 'false'){
-			return ['boolean',value];
-		}
-
-		// Plain string
-		return ['string',JSON.stringify(value)];
+	// Underscores
+	if(value._){
+		return value._;
 	}
 
-	if(typeof value == 'object'){
-		// Underscores
-		if(value._){
-			return ['funky_string',JSON.stringify(value._)];
-		}
+	// oor:external
+	if(value.$ && value.$['oor:external']){
+		return JSON.stringify(value.$['oor:external']);
+	}
 
-		// oor:external
-		if(value.$ && value.$['oor:external']){
-			return ['oor:external',JSON.stringify(value.$['oor:external'])];
-		}
-
-		// it
-		if(value.it){
-			// Sometimes these are arrays.
-			return ['it', JSON.stringify(value.it)];
-		}
+	// it
+	if(value.it){
+		// Sometimes these are arrays.
+		return JSON.stringify(value.it);
 	}
 
 	// What the hell is this. Some properties are weird and contain multiple
 	// values. These will be returned here.
-	return ['unknown type', JSON.stringify(value)];
+	return value;
 }
